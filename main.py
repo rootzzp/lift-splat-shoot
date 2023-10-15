@@ -10,6 +10,17 @@ import src
 
 
 if __name__ == '__main__':
+    import sys
+    sys.argv = [
+        "main.py", 
+        "train", 
+        "mini/trainval", 
+        "--dataroot", "/mnt/data/nuscenes_mini", 
+        "--logdir","./runs", 
+        "--gpuid", "0",
+        "tensorboard",
+        "--bind_all"
+    ]
     Fire({
         'lidar_check': src.explore.lidar_check,
         'cumsum_check': src.explore.cumsum_check,

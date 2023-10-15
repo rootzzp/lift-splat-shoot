@@ -6,7 +6,6 @@ Authors: Jonah Philion and Sanja Fidler
 
 import torch
 from time import time
-from tensorboardX import SummaryWriter
 import numpy as np
 import os
 
@@ -37,7 +36,7 @@ def train(version,
             dbound=[4.0, 45.0, 1.0],
 
             bsz=4,
-            nworkers=10,
+            nworkers=1,
             lr=1e-3,
             weight_decay=1e-7,
             ):
@@ -71,7 +70,7 @@ def train(version,
 
     loss_fn = SimpleLoss(pos_weight).cuda(gpuid)
 
-    writer = SummaryWriter(logdir=logdir)
+    # writer = SummaryWriter(logdir=logdir)
     val_step = 1000 if version == 'mini' else 10000
 
     model.train()
@@ -96,25 +95,25 @@ def train(version,
             counter += 1
             t1 = time()
 
-            if counter % 10 == 0:
-                print(counter, loss.item())
-                writer.add_scalar('train/loss', loss, counter)
+            # if counter % 10 == 0:
+            #     print(counter, loss.item())
+            #     writer.add_scalar('train/loss', loss, counter)
 
-            if counter % 50 == 0:
-                _, _, iou = get_batch_iou(preds, binimgs)
-                writer.add_scalar('train/iou', iou, counter)
-                writer.add_scalar('train/epoch', epoch, counter)
-                writer.add_scalar('train/step_time', t1 - t0, counter)
+            # if counter % 50 == 0:
+            #     _, _, iou = get_batch_iou(preds, binimgs)
+            #     writer.add_scalar('train/iou', iou, counter)
+            #     writer.add_scalar('train/epoch', epoch, counter)
+            #     writer.add_scalar('train/step_time', t1 - t0, counter)
 
-            if counter % val_step == 0:
-                val_info = get_val_info(model, valloader, loss_fn, device)
-                print('VAL', val_info)
-                writer.add_scalar('val/loss', val_info['loss'], counter)
-                writer.add_scalar('val/iou', val_info['iou'], counter)
+            # if counter % val_step == 0:
+            #     val_info = get_val_info(model, valloader, loss_fn, device)
+            #     print('VAL', val_info)
+            #     writer.add_scalar('val/loss', val_info['loss'], counter)
+            #     writer.add_scalar('val/iou', val_info['iou'], counter)
 
-            if counter % val_step == 0:
-                model.eval()
-                mname = os.path.join(logdir, "model{}.pt".format(counter))
-                print('saving', mname)
-                torch.save(model.state_dict(), mname)
-                model.train()
+            # if counter % val_step == 0:
+            #     model.eval()
+            #     mname = os.path.join(logdir, "model{}.pt".format(counter))
+            #     print('saving', mname)
+            #     torch.save(model.state_dict(), mname)
+            #     model.train()
