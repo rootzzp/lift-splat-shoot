@@ -51,10 +51,12 @@ class CamEncode(nn.Module):
     def get_depth_feat(self, x):
         x = self.get_eff_depth(x)
         # Depth
-        x = self.depthnet(x)
+        x = self.depthnet(x) # [bs*n,41+64,h,w]
 
-        depth = self.get_depth_dist(x[:, :self.D])
-        new_x = depth.unsqueeze(1) * x[:, self.D:(self.D + self.C)].unsqueeze(2)
+        depth = self.get_depth_dist(x[:, :self.D]) #[bs*n,41,h,w]
+        # depth.unsqueeze(1): [bs*n,1,41,h,w]
+        # x[:, self.D:(self.D + self.C)].unsqueeze(2): [bs*n,64,1,h,w]
+        new_x = depth.unsqueeze(1) * x[:, self.D:(self.D + self.C)].unsqueeze(2) # [bs*n,64,41,h,w]
 
         return depth, new_x
 
@@ -136,14 +138,17 @@ class LiftSplatShoot(nn.Module):
                                               self.grid_conf['ybound'],
                                               self.grid_conf['zbound'],
                                               )
+        # dx:[0.5,  0.5,    20]
+        # bx:[-49.75, -49.75, 0]
+        # nx:[200,  200,    1]
         self.dx = nn.Parameter(dx, requires_grad=False)
         self.bx = nn.Parameter(bx, requires_grad=False)
         self.nx = nn.Parameter(nx, requires_grad=False)
 
         self.downsample = 16
         self.camC = 64
-        self.frustum = self.create_frustum()
-        self.D, _, _, _ = self.frustum.shape
+        self.frustum = self.create_frustum() # shape [41,8,22,3]
+        self.D, _, _, _ = self.frustum.shape # D : 41
         self.camencode = CamEncode(self.D, self.camC, self.downsample)
         self.bevencode = BevEncode(inC=self.camC, outC=outC)
 
@@ -152,15 +157,15 @@ class LiftSplatShoot(nn.Module):
     
     def create_frustum(self):
         # make grid in image plane
-        ogfH, ogfW = self.data_aug_conf['final_dim']
-        fH, fW = ogfH // self.downsample, ogfW // self.downsample
-        ds = torch.arange(*self.grid_conf['dbound'], dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW)
-        D, _, _ = ds.shape
-        xs = torch.linspace(0, ogfW - 1, fW, dtype=torch.float).view(1, 1, fW).expand(D, fH, fW)
-        ys = torch.linspace(0, ogfH - 1, fH, dtype=torch.float).view(1, fH, 1).expand(D, fH, fW)
+        ogfH, ogfW = self.data_aug_conf['final_dim'] # 128,352
+        fH, fW = ogfH // self.downsample, ogfW // self.downsample # downsample:16; fH:8; fW:22
+        ds = torch.arange(*self.grid_conf['dbound'], dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW) # dbound: [4,45,1],从4开始，自增1到45
+        D, _, _ = ds.shape # ds shape : [41,8,22]
+        xs = torch.linspace(0, ogfW - 1, fW, dtype=torch.float).view(1, 1, fW).expand(D, fH, fW) # shape[41,8,22]
+        ys = torch.linspace(0, ogfH - 1, fH, dtype=torch.float).view(1, fH, 1).expand(D, fH, fW) # shape[41,8,22]
 
         # D x H x W x 3
-        frustum = torch.stack((xs, ys, ds), -1)
+        frustum = torch.stack((xs, ys, ds), -1) # shape [41,8,22,3] 映射回原图的视锥点云坐标，41：z方向，8：x方向，22：y方向
         return nn.Parameter(frustum, requires_grad=False)
 
     def get_geometry(self, rots, trans, intrins, post_rots, post_trans):
@@ -168,20 +173,24 @@ class LiftSplatShoot(nn.Module):
         of the points in the point cloud.
         Returns B x N x D x H/downsample x W/downsample x 3
         """
-        B, N, _ = trans.shape
+        B, N, _ = trans.shape # N : 5
 
         # undo post-transformation
         # B x N x D x H x W x 3
-        points = self.frustum - post_trans.view(B, N, 1, 1, 1, 3)
-        points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+        points = self.frustum - post_trans.view(B, N, 1, 1, 1, 3) # frustum [41,8,22,3]; post_trans [bs,5,3]
+        points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1)) #B x N x D x H x W x 3 x 1
 
         # cam_to_ego
+        """
+        Z*P_uv=KP_c,K为内参矩阵, Z为相机坐标系下点的z坐标
+        P_e = rots @ P_c + trans
+        """
         points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3],
                             points[:, :, :, :, :, 2:3]
-                            ), 5)
+                            ), 5) #Z*P_uv shape:[B,N,D,H,W,3,1]
         combine = rots.matmul(torch.inverse(intrins))
-        points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
-        points += trans.view(B, N, 1, 1, 1, 3)
+        points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1) # rots @ K逆 @ (Z*P_uv)
+        points += trans.view(B, N, 1, 1, 1, 3) #B x N x D x H x W x 3
 
         return points
 
@@ -198,6 +207,10 @@ class LiftSplatShoot(nn.Module):
         return x
 
     def voxel_pooling(self, geom_feats, x):
+        """_summary_
+        geom_feats:[bs,N(5),D(41),h,w,3]
+        x: [bs,N(5),41,h,w,64]
+        """
         B, N, D, H, W, C = x.shape
         Nprime = B*N*D*H*W
 
@@ -208,8 +221,8 @@ class LiftSplatShoot(nn.Module):
         geom_feats = ((geom_feats - (self.bx - self.dx/2.)) / self.dx).long()
         geom_feats = geom_feats.view(Nprime, 3)
         batch_ix = torch.cat([torch.full([Nprime//B, 1], ix,
-                             device=x.device, dtype=torch.long) for ix in range(B)])
-        geom_feats = torch.cat((geom_feats, batch_ix), 1)
+                             device=x.device, dtype=torch.long) for ix in range(B)])# [Nprime//bs,bs] bs = 1时:[Nprime,1],value = 0
+        geom_feats = torch.cat((geom_feats, batch_ix), 1) # [Nprime,3+bs]
 
         # filter out points that are outside box
         kept = (geom_feats[:, 0] >= 0) & (geom_feats[:, 0] < self.nx[0])\
@@ -230,11 +243,11 @@ class LiftSplatShoot(nn.Module):
         if not self.use_quickcumsum:
             x, geom_feats = cumsum_trick(x, geom_feats, ranks)
         else:
-            x, geom_feats = QuickCumsum.apply(x, geom_feats, ranks)
+            x, geom_feats = QuickCumsum.apply(x, geom_feats, ranks)# x:在不同voxel里面的特征值（累加后的）,geom_feats:这些不同voxel的坐标
 
         # griddify (B x C x Z x X x Y)
-        final = torch.zeros((B, C, self.nx[2], self.nx[0], self.nx[1]), device=x.device)
-        final[geom_feats[:, 3], :, geom_feats[:, 2], geom_feats[:, 0], geom_feats[:, 1]] = x
+        final = torch.zeros((B, C, self.nx[2], self.nx[0], self.nx[1]), device=x.device)#[1,64,1,200,200]
+        final[geom_feats[:, 3], :, geom_feats[:, 2], geom_feats[:, 0], geom_feats[:, 1]] = x #geom_feats[:, 3]:batch_index geom_feats[:, 2]:z  geom_feats[:, 0]:x geom_feats[:, 1]:y
 
         # collapse Z
         final = torch.cat(final.unbind(dim=2), 1)
@@ -242,16 +255,16 @@ class LiftSplatShoot(nn.Module):
         return final
 
     def get_voxels(self, x, rots, trans, intrins, post_rots, post_trans):
-        geom = self.get_geometry(rots, trans, intrins, post_rots, post_trans)
-        x = self.get_cam_feats(x)
+        geom = self.get_geometry(rots, trans, intrins, post_rots, post_trans) # B x N x D x H x W x 3
+        x = self.get_cam_feats(x) # x [bs,N(5),41,h,w,64]
 
-        x = self.voxel_pooling(geom, x)
+        x = self.voxel_pooling(geom, x) # [bs,64,200,200]
 
         return x
 
     def forward(self, x, rots, trans, intrins, post_rots, post_trans):
-        x = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
-        x = self.bevencode(x)
+        x = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans) #[bs,64,200,200]
+        x = self.bevencode(x) #[1,1,200,200]
         return x
 
 
